@@ -28,7 +28,6 @@
     .safe-nav {
       padding-bottom: env(safe-area-inset-bottom);
     }
-    /* Custom scrollbar hide */
     .no-scrollbar::-webkit-scrollbar {
       display: none;
     }
@@ -612,9 +611,44 @@
     ];
 
     // =========================================================================
-    // 2. STATE MANAGEMENT & LOCALSTORAGE PERSISTENCE
+    // 2. KST (KOREA STANDARD TIME, UTC+9) DATE & DAY INDEX HELPERS
     // =========================================================================
-    const STORAGE_KEY = 'realtor2027_couple_app_v2';
+    function getKSTInfo() {
+      // Shift current UTC timestamp by +9 hours to guarantee exact KST calendar date regardless of device timezone
+      const kstMs = Date.now() + (9 * 60 * 60 * 1000);
+      const kstDate = new Date(kstMs);
+      const y = kstDate.getUTCFullYear();
+      const m = String(kstDate.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(kstDate.getUTCDate()).padStart(2, '0');
+      const dateStr = `${y}-${m}-${d}`;
+      const kstDayIndex = Math.floor(kstMs / (1000 * 60 * 60 * 24));
+      return { dateStr, kstDayIndex, month: kstDate.getUTCMonth() + 1, day: kstDate.getUTCDate() };
+    }
+
+    function getYesterdayKSTStr() {
+      const yesterdayMs = Date.now() + (9 * 60 * 60 * 1000) - (24 * 60 * 60 * 1000);
+      const d = new Date(yesterdayMs);
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+    }
+
+    // =========================================================================
+    // 3. STATE MANAGEMENT, STORAGE DIAGNOSTICS & BACKUP/RESTORE
+    // =========================================================================
+    const STORAGE_KEY = 'realtor2027_couple_app_v3';
+    const LEGACY_KEYS = ['realtor2027_couple_app_v2', 'realtor2027_couple_app_v1'];
+
+    function checkStorageAvailable() {
+      try {
+        const testKey = '__test_ls__';
+        localStorage.setItem(testKey, '1');
+        localStorage.removeItem(testKey);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    const isStorageAvailable = checkStorageAvailable();
 
     function createDefaultUserData(name, avatar) {
       return {
@@ -623,25 +657,75 @@
         totalSeconds: 0,
         streakDays: 0,
         lastStudyDate: null,
-        dailyGoalMins: 30, // 30 or 60
-        strategyMode: 'first_priority', // 'first_priority' (75:25) or 'all_in_one' (50:50)
-        completedChapters: {}, // { 'hak-0': true }
-        readNotes: {}, // { 'hak-1': true }
-        solvedQuizzes: {}, // { 'q-hak-1': { correct: true, lastAttempt: '...' } }
-        wrongQuizzes: {}, // { 'q-hak-1': true }
-        todayDoneNotes: {}, // { 'YYYY-MM-DD': ['hak-1'] }
-        todayDoneQuizzes: {}, // { 'YYYY-MM-DD': ['q-hak-1'] }
-        customNotes: [] // user added notes
+        selectedDay: 1, // 현재 선택된 학습 차수 (1일차, 2일차, 3일차...)
+        maxUnlockedDay: 1, // 도달한 최고 차수
+        lastActiveDateForDay: null, // KST 자정 경과 시 자동 차수 증가 기준일
+        dailyGoalMins: 30,
+        strategyMode: 'first_priority',
+        dailyShuffleOffset: 0, // Increments when user clicks "새 문제 세트 받기"
+        dailyShuffleDate: null,
+        completedChapters: {},
+        readNotes: {},
+        solvedQuizzes: {},
+        wrongQuizzes: {},
+        todayDoneNotes: {},
+        todayDoneQuizzes: {},
+        customNotes: []
       };
+    }
+
+    function normalizeUserData(u, fallbackName, fallbackAvatar) {
+      const base = createDefaultUserData(fallbackName, fallbackAvatar);
+      const merged = {
+        ...base,
+        ...(u || {}),
+        completedChapters: (u && u.completedChapters) || {},
+        readNotes: (u && u.readNotes) || {},
+        solvedQuizzes: (u && u.solvedQuizzes) || {},
+        wrongQuizzes: (u && u.wrongQuizzes) || {},
+        todayDoneNotes: (u && u.todayDoneNotes) || {},
+        todayDoneQuizzes: (u && u.todayDoneQuizzes) || {},
+        customNotes: (u && Array.isArray(u.customNotes)) ? u.customNotes : []
+      };
+      const kstToday = getKSTInfo().dateStr;
+      if (!merged.lastActiveDateForDay) {
+        // 기존에 어제 공부한 기록이 있으면 오늘 접속 시 자동으로 2일차로 시작
+        if (merged.lastStudyDate && merged.lastStudyDate !== kstToday) {
+          merged.selectedDay = Math.max(2, (merged.streakDays || 1) + 1);
+          merged.maxUnlockedDay = merged.selectedDay;
+        }
+        merged.lastActiveDateForDay = kstToday;
+      } else if (merged.lastActiveDateForDay !== kstToday) {
+        // 한국시간 자정이 지나 새 날에 앱을 열면 차수 자동 +1
+        merged.selectedDay = (merged.selectedDay || 1) + 1;
+        merged.maxUnlockedDay = Math.max(merged.maxUnlockedDay || 1, merged.selectedDay);
+        merged.lastActiveDateForDay = kstToday;
+      }
+      return merged;
     }
 
     function loadState() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        let raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          for (const lk of LEGACY_KEYS) {
+            const legacyRaw = localStorage.getItem(lk);
+            if (legacyRaw) {
+              raw = legacyRaw;
+              break;
+            }
+          }
+        }
         if (raw) {
           const parsed = JSON.parse(raw);
-          if (parsed && parsed.users && parsed.users.wife && parsed.users.husband) {
-            return parsed;
+          if (parsed && parsed.users) {
+            return {
+              activeProfile: parsed.activeProfile === 'husband' ? 'husband' : 'wife',
+              users: {
+                wife: normalizeUserData(parsed.users.wife, '아내 (합격생)', '👩'),
+                husband: normalizeUserData(parsed.users.husband, '남편 (러닝메이트)', '👨')
+              }
+            };
           }
         }
       } catch (e) {
@@ -657,17 +741,21 @@
     }
 
     let appState = loadState();
+    let currentKSTDate = getKSTInfo().dateStr;
+
     let uiState = {
-      activeTab: 'today', // 'today' | 'curriculum' | 'house'
-      curriculumSubTab: 'notes', // 'notes' | 'quiz' | 'progress' | 'terms'
+      activeTab: 'today',
+      curriculumSubTab: 'notes',
       selectedSubjectFilter: 'all',
-      quizFilter: 'all', // 'all' | 'wrong'
+      quizFilter: 'all',
       openNoteId: null,
-      quizAnswers: {}, // current session answer reveal { qId: { userAns: true/false, isCorrect: bool } }
+      quizAnswers: {},
       timerRunning: false,
       sessionSeconds: 0,
       showAddNoteModal: false,
       showEditNameModal: false,
+      showBackupModal: false,
+      backupText: '',
       toastMessage: null
     };
 
@@ -679,14 +767,6 @@
       } catch (e) {
         console.error('Failed to save state:', e);
       }
-    }
-
-    function getTodayStr() {
-      const now = new Date();
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, '0');
-      const d = String(now.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
     }
 
     function getActiveUser() {
@@ -706,11 +786,52 @@
           uiState.toastMessage = null;
           render();
         }
-      }, 2400);
+      }, 2600);
     }
 
+    // Check if KST date rolled over while app was in background or open
+    function checkKSTRollover(notify = false) {
+      const kst = getKSTInfo();
+      if (kst.dateStr !== currentKSTDate) {
+        currentKSTDate = kst.dateStr;
+        uiState.sessionSeconds = 0;
+        uiState.quizAnswers = {};
+        uiState.openNoteId = null;
+
+        // Reset daily shuffle offset and advance study day (+1일차) on KST midnight
+        ['wife', 'husband'].forEach(key => {
+          const u = appState.users[key];
+          if (u.dailyShuffleDate !== kst.dateStr) {
+            u.dailyShuffleOffset = 0;
+            u.dailyShuffleDate = kst.dateStr;
+          }
+          if (u.lastActiveDateForDay !== kst.dateStr) {
+            u.selectedDay = (u.selectedDay || 1) + 1;
+            u.maxUnlockedDay = Math.max(u.maxUnlockedDay || 1, u.selectedDay);
+            u.lastActiveDateForDay = kst.dateStr;
+          }
+        });
+        saveState();
+        if (notify) {
+          showToast(`🌅 ${kst.month}월 ${kst.day}일 새 학습 세트가 준비되었습니다!`);
+        } else {
+          render();
+        }
+      }
+    }
+
+    // Listen for iOS Safari / Home Screen PWA wake-up events
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        checkKSTRollover(true);
+      }
+    });
+    window.addEventListener('pageshow', () => checkKSTRollover(true));
+    window.addEventListener('focus', () => checkKSTRollover(false));
+    setInterval(() => checkKSTRollover(true), 60 * 1000);
+
     // =========================================================================
-    // 3. ACTIONS & LOGIC
+    // 4. ACTIONS & LOGIC
     // =========================================================================
     function switchProfile(profileKey) {
       if (appState.activeProfile === profileKey) return;
@@ -736,6 +857,53 @@
       user.strategyMode = mode;
       saveState();
       showToast(mode === 'first_priority' ? '🎯 1차 우선 합격 전략(75:25) 적용!' : '📚 1·2차 동차 합격 전략(50:50) 적용!');
+    }
+
+    function selectDay(dayNum) {
+      const target = Math.max(1, Math.min(30, parseInt(dayNum, 10) || 1));
+      const user = getActiveUser();
+      user.selectedDay = target;
+      user.maxUnlockedDay = Math.max(user.maxUnlockedDay || 1, target);
+      user.dailyShuffleOffset = 0;
+      uiState.openNoteId = null;
+      uiState.quizAnswers = {};
+      saveState();
+      showToast(`📅 ${target}일차 학습 코스로 이동했습니다!`);
+    }
+
+    function prevDay() {
+      const user = getActiveUser();
+      const cur = user.selectedDay || 1;
+      if (cur <= 1) {
+        showToast('이미 첫 번째(1일차) 코스입니다!');
+        return;
+      }
+      selectDay(cur - 1);
+    }
+
+    function nextDay() {
+      const user = getActiveUser();
+      const cur = user.selectedDay || 1;
+      if (cur >= 30) {
+        showToast('30일차 전체 커리큘럼 마지막 차수입니다!');
+        return;
+      }
+      selectDay(cur + 1);
+    }
+
+    function shuffleTodaySet() {
+      const user = getActiveUser();
+      const kst = getKSTInfo();
+      if (user.dailyShuffleDate !== kst.dateStr) {
+        user.dailyShuffleDate = kst.dateStr;
+        user.dailyShuffleOffset = 1;
+      } else {
+        user.dailyShuffleOffset = (user.dailyShuffleOffset || 0) + 1;
+      }
+      uiState.openNoteId = null;
+      uiState.quizAnswers = {};
+      saveState();
+      showToast('🔄 새로운 요약 노트와 OX 문제 세트로 교체했습니다!');
     }
 
     function toggleTimer() {
@@ -782,17 +950,25 @@
     }
 
     function updateStreak(user) {
-      const today = getTodayStr();
+      const today = getKSTInfo().dateStr;
       if (user.lastStudyDate === today) return;
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-      if (user.lastStudyDate === yStr) {
+      const yesterday = getYesterdayKSTStr();
+      if (user.lastStudyDate === yesterday) {
         user.streakDays = (user.streakDays || 0) + 1;
       } else {
         user.streakDays = 1;
       }
       user.lastStudyDate = today;
+    }
+
+    function getDisplayStreak(user) {
+      const today = getKSTInfo().dateStr;
+      const yesterday = getYesterdayKSTStr();
+      if (!user.lastStudyDate) return 0;
+      if (user.lastStudyDate === today || user.lastStudyDate === yesterday) {
+        return user.streakDays || 1;
+      }
+      return 0;
     }
 
     function toggleChapter(subjectId, idx) {
@@ -806,14 +982,13 @@
 
     function toggleReadNote(noteId) {
       const user = getActiveUser();
-      const today = getTodayStr();
+      const today = getKSTInfo().dateStr;
       user.readNotes[noteId] = !user.readNotes[noteId];
       if (!user.todayDoneNotes[today]) user.todayDoneNotes[today] = [];
       if (user.readNotes[noteId]) {
         if (!user.todayDoneNotes[today].includes(noteId)) {
           user.todayDoneNotes[today].push(noteId);
         }
-        // Bonus 3 mins for completing a summary note
         user.totalSeconds += 180;
         updateStreak(user);
         showToast('✅ 요약 노트 완료! (+3분 건축 경험치 적립)');
@@ -829,7 +1004,7 @@
       uiState.quizAnswers[quizId] = { userChoice, isCorrect };
 
       const user = getActiveUser();
-      const today = getTodayStr();
+      const today = getKSTInfo().dateStr;
       user.solvedQuizzes[quizId] = { correct: isCorrect, date: today };
       if (!user.todayDoneQuizzes[today]) user.todayDoneQuizzes[today] = [];
       if (!user.todayDoneQuizzes[today].includes(quizId)) {
@@ -838,7 +1013,7 @@
 
       if (isCorrect) {
         delete user.wrongQuizzes[quizId];
-        user.totalSeconds += 90; // +1.5 min per solved quiz
+        user.totalSeconds += 90;
       } else {
         user.wrongQuizzes[quizId] = true;
         user.totalSeconds += 60;
@@ -891,11 +1066,62 @@
       showToast('👥 부부 프로필 이름이 저장되었습니다!');
     }
 
+    // Backup & Restore Handlers
+    function openBackupModal() {
+      uiState.backupText = JSON.stringify(appState);
+      uiState.showBackupModal = true;
+      render();
+    }
+
+    function copyBackupCode() {
+      const code = JSON.stringify(appState);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(() => {
+          showToast('📋 백업 코드가 클립보드에 복사되었습니다! 카카오톡 나에게 보내기로 보관하세요.');
+        }).catch(() => {
+          showToast('아래 텍스트 상자를 길게 눌러 전체 복사해 주세요.');
+        });
+      } else {
+        showToast('아래 텍스트 상자를 길게 눌러 전체 복사해 주세요.');
+      }
+    }
+
+    function restoreFromBackupCode() {
+      const textarea = document.getElementById('backupTextarea');
+      if (!textarea) return;
+      const raw = textarea.value.trim();
+      if (!raw) {
+        showToast('⚠️ 복원할 백업 코드를 붙여넣어 주세요.');
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || !parsed.users || !parsed.users.wife) {
+          throw new Error('Invalid format');
+        }
+        appState = {
+          activeProfile: parsed.activeProfile === 'husband' ? 'husband' : 'wife',
+          users: {
+            wife: normalizeUserData(parsed.users.wife, '아내 (합격생)', '👩'),
+            husband: normalizeUserData(parsed.users.husband, '남편 (러닝메이트)', '👨')
+          }
+        };
+        saveState();
+        uiState.showBackupModal = false;
+        showToast('✅ 학습 데이터가 성공적으로 복원되었습니다!');
+      } catch (e) {
+        showToast('❌ 올바른 백업 코드가 아닙니다. 전체 코드를 다시 확인해 주세요.');
+      }
+    }
+
     // =========================================================================
-    // 4. DAILY RECOMMENDATION ENGINE (1ST PRIORITY vs ALL-IN-ONE)
+    // 5. DAILY RECOMMENDATION ENGINE (KST MIDNIGHT + UNREAD FIRST + MANUAL SHUFFLE)
     // =========================================================================
     function getDailyPlan() {
       const user = getActiveUser();
+      const kst = getKSTInfo();
+      const dayNum = user.selectedDay || 1;
+      const dayZeroIdx = dayNum - 1;
       const is60 = user.dailyGoalMins === 60;
       const noteTargetCount = is60 ? 4 : 2;
       const quizTargetCount = is60 ? 8 : 4;
@@ -907,17 +1133,16 @@
       const part1Quizzes = OX_QUIZZES.filter(q => ['hak', 'min'].includes(q.subjectId));
       const part2Quizzes = OX_QUIZZES.filter(q => !['hak', 'min'].includes(q.subjectId));
 
-      // Deterministic daily rotation based on day of year + unread priority
-      const dayIndex = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
+      const shuffleOffset = user.dailyShuffleOffset || 0;
 
-      function pickItems(pool, count, doneMap, offset) {
-        const unread = pool.filter(item => !doneMap[item.id]);
-        const source = unread.length >= count ? unread : [...unread, ...pool];
+      // Each Day (1일차, 2일차, 3일차...) maps cleanly to a sequential block of notes & quizzes
+      function pickByDay(pool, count, baseOffset) {
+        if (count <= 0 || pool.length === 0) return [];
+        const startIdx = (dayZeroIdx * count + shuffleOffset * count + baseOffset) % pool.length;
         const picked = [];
         const used = new Set();
-        for (let i = 0; i < source.length && picked.length < count; i++) {
-          const idx = (dayIndex + offset + i) % source.length;
-          const item = source[idx];
+        for (let i = 0; i < pool.length && picked.length < count; i++) {
+          const item = pool[(startIdx + i) % pool.length];
           if (!used.has(item.id)) {
             used.add(item.id);
             picked.push(item);
@@ -928,13 +1153,11 @@
 
       let p1NoteCount, p2NoteCount, p1QuizCount, p2QuizCount;
       if (user.strategyMode === 'first_priority') {
-        // 75% Part 1, 25% Part 2
         p1NoteCount = is60 ? 3 : 2;
-        p2NoteCount = is60 ? 1 : 0; // In 30m mode, 2 notes are Part 1, and 1 quiz is Part 2 to keep 75:25
+        p2NoteCount = is60 ? 1 : 0;
         p1QuizCount = is60 ? 6 : 3;
         p2QuizCount = is60 ? 2 : 1;
       } else {
-        // 50% Part 1, 50% Part 2
         p1NoteCount = is60 ? 2 : 1;
         p2NoteCount = is60 ? 2 : 1;
         p1QuizCount = is60 ? 4 : 2;
@@ -942,28 +1165,27 @@
       }
 
       const todayNotes = [
-        ...pickItems(part1Notes, p1NoteCount, user.readNotes, 0),
-        ...pickItems(part2Notes, p2NoteCount, user.readNotes, 3)
+        ...pickByDay(part1Notes, p1NoteCount, 0),
+        ...pickByDay(part2Notes, p2NoteCount, 0)
       ];
 
-      // Prioritize wrong quizzes in today's quiz mix
+      // Include 1 wrong quiz if available (except on Day 1)
       const wrongIds = Object.keys(user.wrongQuizzes || {});
       const wrongPool = OX_QUIZZES.filter(q => wrongIds.includes(q.id));
       let todayQuizzes = [];
-      if (wrongPool.length > 0) {
-        todayQuizzes.push(wrongPool[dayIndex % wrongPool.length]);
+      if (wrongPool.length > 0 && dayNum > 1) {
+        todayQuizzes.push(wrongPool[(dayZeroIdx + shuffleOffset) % wrongPool.length]);
       }
 
       const needP1 = Math.max(0, p1QuizCount - todayQuizzes.filter(q => ['hak', 'min'].includes(q.subjectId)).length);
       const needP2 = Math.max(0, p2QuizCount - todayQuizzes.filter(q => !['hak', 'min'].includes(q.subjectId)).length);
 
-      const pickedP1Q = pickItems(part1Quizzes.filter(q => !todayQuizzes.some(t => t.id === q.id)), needP1, user.solvedQuizzes, 1);
-      const pickedP2Q = pickItems(part2Quizzes.filter(q => !todayQuizzes.some(t => t.id === q.id)), needP2, user.solvedQuizzes, 5);
+      const pickedP1Q = pickByDay(part1Quizzes.filter(q => !todayQuizzes.some(t => t.id === q.id)), needP1, 0);
+      const pickedP2Q = pickByDay(part2Quizzes.filter(q => !todayQuizzes.some(t => t.id === q.id)), needP2, 0);
 
       todayQuizzes = [...todayQuizzes, ...pickedP1Q, ...pickedP2Q];
 
-      // Beginner term of the day
-      const termOfDay = BEGINNER_TERMS[dayIndex % BEGINNER_TERMS.length];
+      const termOfDay = BEGINNER_TERMS[(dayZeroIdx + shuffleOffset) % BEGINNER_TERMS.length];
 
       return {
         noteTargetCount,
@@ -975,7 +1197,7 @@
     }
 
     // =========================================================================
-    // 5. HELPER RENDERERS (SVG HOUSE, FORMATTERS)
+    // 6. HELPER RENDERERS (SVG HOUSE, FORMATTERS)
     // =========================================================================
     function formatTime(sec) {
       const m = Math.floor(sec / 60);
@@ -1001,22 +1223,18 @@
     }
 
     function renderHouseSVG(level) {
-      // Progressive architectural illustration from empty lot (Lv.1) to 2-story Dream Office/Home (Lv.6)
       return `
         <svg viewBox="0 0 320 210" class="w-full h-48 rounded-2xl bg-gradient-to-b from-sky-100 via-sky-50 to-emerald-50 border border-sky-200/70 shadow-inner">
-          <!-- Sun & Clouds -->
           <circle cx="268" cy="40" r="18" fill="#FDE047" opacity="0.9" />
           <g fill="#FFFFFF" opacity="0.85">
             <circle cx="65" cy="38" r="12" /><circle cx="78" cy="35" r="15" /><circle cx="92" cy="39" r="11" />
             <circle cx="195" cy="52" r="9" /><circle cx="206" cy="50" r="12" /><circle cx="217" cy="53" r="9" />
           </g>
 
-          <!-- Ground / Land Parcel -->
           <rect x="0" y="168" width="320" height="42" fill="#86EFAC" />
           <rect x="28" y="164" width="264" height="10" rx="4" fill="#D97706" opacity="0.35" />
 
           ${level === 1 ? `
-            <!-- Lv 1: Land Parcel & Survey Stakes -->
             <rect x="55" y="156" width="210" height="12" rx="3" fill="#F59E0B" opacity="0.45" stroke="#D97706" stroke-dasharray="4 3" />
             <line x1="65" y1="142" x2="65" y2="168" stroke="#92400E" stroke-width="3" />
             <polygon points="65,142 84,147 65,152" fill="#EF4444" />
@@ -1027,13 +1245,11 @@
           ` : ''}
 
           ${level >= 2 ? `
-            <!-- Foundation Concrete Slab -->
             <rect x="58" y="156" width="204" height="12" rx="2" fill="#64748B" />
             <rect x="64" y="152" width="192" height="5" fill="#94A3B8" />
           ` : ''}
 
           ${level === 2 ? `
-            <!-- Lv 2: Rebar & Construction Crane -->
             <line x1="85" y1="125" x2="85" y2="152" stroke="#475569" stroke-width="3" />
             <line x1="160" y1="125" x2="160" y2="152" stroke="#475569" stroke-width="3" />
             <line x1="235" y1="125" x2="235" y2="152" stroke="#475569" stroke-width="3" />
@@ -1042,22 +1258,18 @@
           ` : ''}
 
           ${level >= 3 ? `
-            <!-- 1st Floor Structure (Realtor Office) -->
             <rect x="68" y="106" width="184" height="46" fill="${level >= 5 ? '#FFFBEB' : '#E2E8F0'}" stroke="#94A3B8" stroke-width="1.5" />
-            <!-- Office Glass Door & Windows -->
             <rect x="82" y="118" width="32" height="34" rx="2" fill="#BAE6FD" stroke="#0284C7" stroke-width="1.5" />
             <rect x="126" y="118" width="52" height="24" rx="2" fill="#E0F2FE" stroke="#0284C7" stroke-width="1.5" />
             <rect x="190" y="118" width="48" height="24" rx="2" fill="#E0F2FE" stroke="#0284C7" stroke-width="1.5" />
           ` : ''}
 
           ${level === 3 ? `
-            <!-- 1st Floor Temporary Roof Slab -->
             <rect x="64" y="100" width="192" height="7" rx="2" fill="#64748B" />
             <text x="160" y="92" text-anchor="middle" font-size="10" font-weight="bold" fill="#1E40AF">1층 골조 완료! (1차 합격권)</text>
           ` : ''}
 
           ${level >= 4 ? `
-            <!-- 2nd Floor Structure (Couple's Home) -->
             <rect x="74" y="62" width="172" height="44" fill="${level >= 5 ? '#FEF3C7' : '#CBD5E1'}" stroke="#94A3B8" stroke-width="1.5" />
             <rect x="94" y="72" width="36" height="24" rx="2" fill="#FEF08A" stroke="#D97706" stroke-width="1.5" />
             <rect x="144" y="72" width="36" height="24" rx="2" fill="#FEF08A" stroke="#D97706" stroke-width="1.5" />
@@ -1065,24 +1277,19 @@
           ` : ''}
 
           ${level === 4 ? `
-            <!-- Scaffolding on Lv 4 -->
             <line x1="66" y1="56" x2="254" y2="56" stroke="#F59E0B" stroke-width="3" />
             <text x="160" y="48" text-anchor="middle" font-size="10" font-weight="bold" fill="#B45309">2층 상층부 증축 중!</text>
           ` : ''}
 
           ${level >= 5 ? `
-            <!-- Finished Pitched Roof -->
             <polygon points="58,62 160,22 262,62" fill="#1E3A8A" />
             <polygon points="68,62 160,28 252,62" fill="#2563EB" />
-            <!-- Chimney -->
             <rect x="210" y="28" width="14" height="20" fill="#1E3A8A" />
-            <!-- Signboard on 1st floor -->
             <rect x="122" y="102" width="118" height="14" rx="3" fill="#1E40AF" />
             <text x="181" y="112" text-anchor="middle" font-size="8.5" font-weight="bold" fill="#FFFFFF">부부 공인중개사사무소</text>
           ` : ''}
 
           ${level >= 6 ? `
-            <!-- Lv 6: Trees, Flowers, Celebration Banner -->
             <circle cx="38" cy="146" r="14" fill="#16A34A" />
             <rect x="35" y="156" width="6" height="12" fill="#78350F" />
             <circle cx="282" cy="146" r="14" fill="#16A34A" />
@@ -1095,21 +1302,28 @@
     }
 
     // =========================================================================
-    // 6. VIEW RENDERERS (HEADER, TABS, MODALS)
+    // 7. VIEW RENDERERS (HEADER, TABS, MODALS)
     // =========================================================================
     function renderHeader() {
       const wife = appState.users.wife;
       const husband = appState.users.husband;
       const activeKey = appState.activeProfile;
       const user = getActiveUser();
+      const kst = getKSTInfo();
+      const displayStreak = getDisplayStreak(user);
 
       return `
         <header class="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 pt-3 pb-2.5">
+          ${!isStorageAvailable ? `
+            <div class="mb-2 p-2 rounded-lg bg-rose-50 border border-rose-200 text-[11px] font-bold text-rose-700 leading-snug">
+              ⚠️ 현재 브라우저가 '개인정보 보호 모드'이거나 쿠키가 차단되어 학습 기록이 저장되지 않습니다. Safari 일반 모드에서 열어주세요!
+            </div>
+          ` : ''}
           <div class="flex items-center justify-between gap-2">
             <div>
               <div class="flex items-center gap-1.5">
-                <span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/80">2027 제38회 대비</span>
-                <span class="text-[11px] font-semibold text-slate-400">🔥 ${user.streakDays || 0}일 연속</span>
+                <span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/80">${kst.month}/${kst.day} (KST)</span>
+                <span class="text-[11px] font-semibold text-slate-500">🔥 ${displayStreak}일 연속</span>
               </div>
               <h1 class="text-base font-extrabold text-slate-900 tracking-tight mt-0.5">부부 공인중개사 스터디</h1>
             </div>
@@ -1134,35 +1348,81 @@
 
     function renderTodayTab() {
       const user = getActiveUser();
-      const today = getTodayStr();
+      const today = getKSTInfo().dateStr;
       const plan = getDailyPlan();
 
       const goalSeconds = user.dailyGoalMins * 60;
       const timerPct = Math.min(100, Math.round((uiState.sessionSeconds / goalSeconds) * 100));
 
-      const doneNotesToday = (user.todayDoneNotes[today] || []).filter(id => plan.todayNotes.some(n => n.id === id)).length;
-      const doneQuizzesToday = (user.todayDoneQuizzes[today] || []).filter(id => plan.todayQuizzes.some(q => q.id === id)).length;
+      const doneNotesToday = plan.todayNotes.filter(n => !!user.readNotes[n.id]).length;
+      const doneQuizzesToday = plan.todayQuizzes.filter(q => !!(user.todayDoneQuizzes[today] && user.todayDoneQuizzes[today].includes(q.id))).length;
 
       return `
         <div class="p-4 space-y-4">
+          <!-- 0. Interactive Day Navigator (1일차, 2일차, 3일차... 자유 이동) -->
+          <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200/80 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <button onclick="prevDay()"
+                class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700 active:scale-95 transition-all ${(user.selectedDay || 1) <= 1 ? 'opacity-40' : ''}">
+                ◀ 이전 차수
+              </button>
+
+              <div class="text-center">
+                <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-600 text-white shadow-xs">
+                  <span class="text-xs font-black tracking-tight">📅 ${user.selectedDay || 1}일차 학습</span>
+                </div>
+                <p class="text-[10px] text-slate-400 font-semibold mt-1">좌우 버튼 또는 아래 번호로 자유 이동</p>
+              </div>
+
+              <button onclick="nextDay()"
+                class="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-xs font-extrabold text-indigo-700 border border-indigo-200/80 active:scale-95 transition-all">
+                다음 차수 ▶
+              </button>
+            </div>
+
+            <!-- Quick Day Pills (1일차 ~ 15일차) -->
+            <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pt-0.5 pb-0.5">
+              ${Array.from({ length: Math.max(15, (user.maxUnlockedDay || 1) + 2) }, (_, i) => i + 1).map(d => {
+                const isSelected = (user.selectedDay || 1) === d;
+                const isUnlocked = d <= (user.maxUnlockedDay || 1);
+                return `
+                  <button onclick="selectDay(${d})"
+                    class="shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold border transition-all ${isSelected
+                      ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                      : isUnlocked
+                        ? 'bg-indigo-50/70 text-indigo-700 border-indigo-200/80 hover:bg-indigo-100'
+                        : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'}">
+                    ${d}일차
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
           <!-- 1. Strategy Mode & Daily Goal Selector -->
           <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-3.5">
-            <div class="flex items-center justify-between">
+            <div class="flex items-center justify-between gap-2">
               <div>
-                <span class="text-xs font-semibold text-slate-400">현재 학습자</span>
-                <h2 class="text-base font-extrabold text-slate-900">${user.avatar} ${user.name}님의 오늘 플랜</h2>
+                <span class="text-xs font-semibold text-slate-400">자정 자동 +1일차 · 자유 이동 가능</span>
+                <h2 class="text-base font-extrabold text-slate-900">${user.avatar} ${user.name}님의 ${user.selectedDay || 1}일차 플랜</h2>
               </div>
               <button onclick="setStrategyMode(userStrategyToggle())"
                 class="text-[11px] font-bold px-2.5 py-1.5 rounded-xl border transition-all ${user.strategyMode === 'first_priority'
                   ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
                   : 'bg-emerald-50 text-emerald-700 border-emerald-200'}">
-                ${user.strategyMode === 'first_priority' ? '🎯 1차 우선 합격(75:25)' : '📚 1·2차 동차 합격(50:50)'}
+                ${user.strategyMode === 'first_priority' ? '🎯 1차 우선(75:25)' : '📚 동차 합격(50:50)'}
               </button>
             </div>
 
             <!-- 30m vs 1h Choice Buttons -->
             <div>
-              <p class="text-xs font-bold text-slate-600 mb-2">오늘 얼마 동안 공부할까요?</p>
+              <div class="flex items-center justify-between mb-2">
+                <p class="text-xs font-bold text-slate-600">오늘 공부 분량 선택</p>
+                <button onclick="shuffleTodaySet()"
+                  class="text-[11px] font-extrabold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200/80 transition-all active:scale-95">
+                  🔄 새 문제 세트 받기
+                </button>
+              </div>
               <div class="grid grid-cols-2 gap-2.5">
                 <button onclick="setDailyGoal(30)"
                   class="p-3 rounded-xl border-2 text-left transition-all ${user.dailyGoalMins === 30
@@ -1240,7 +1500,7 @@
             <div class="flex items-center justify-between">
               <div>
                 <h3 class="text-sm font-extrabold text-slate-900">📖 오늘의 핵심 요약 노트 (${doneNotesToday}/${plan.todayNotes.length})</h3>
-                <p class="text-[11px] text-slate-500">1차 과목 중심 배정 · 읽고 완료 버튼 누르기</p>
+                <p class="text-[11px] text-slate-500">미학습 노트 우선 배정 · 읽고 완료 버튼 누르기</p>
               </div>
               <span class="text-xs font-bold text-indigo-600">${Math.round((doneNotesToday / Math.max(1, plan.todayNotes.length)) * 100)}%</span>
             </div>
@@ -1295,7 +1555,7 @@
                 <h3 class="text-sm font-extrabold text-slate-900">✍️ 오늘의 기출 변형 OX (${doneQuizzesToday}/${plan.todayQuizzes.length})</h3>
                 <p class="text-[11px] text-slate-500">틀린 문제는 자동으로 오답노트에 저장됩니다</p>
               </div>
-              <span class="text-xs font-bold text-emerald-600">${Math.round((doneQuizzesToday / Math.max(1, plan.todayQuizzes.length)) * 100)}%</span>
+              <button onclick="shuffleTodaySet()" class="text-[11px] font-bold text-indigo-600 underline">문제 교체</button>
             </div>
 
             <div class="space-y-3">
@@ -1311,6 +1571,7 @@
       const user = getActiveUser();
       const attempt = uiState.quizAnswers[q.id];
       const isWrongSaved = !!user.wrongQuizzes[q.id];
+      const prevSolved = user.solvedQuizzes[q.id];
 
       return `
         <div class="p-3.5 rounded-xl border ${attempt ? (attempt.isCorrect ? 'border-emerald-300 bg-emerald-50/40' : 'border-rose-300 bg-rose-50/40') : 'border-slate-200 bg-slate-50/40'} space-y-2.5">
@@ -1319,6 +1580,7 @@
               <span class="text-[10px] font-extrabold text-slate-400">Q${num}.</span>
               <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${sub.badge}">${sub.part}차 · ${sub.short}</span>
               ${isWrongSaved ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700">오답복습</span>' : ''}
+              ${(!isWrongSaved && prevSolved && prevSolved.correct) ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">✓ 완료</span>' : ''}
             </div>
             ${attempt ? `<button onclick="resetQuizChoice('${q.id}')" class="text-[10px] text-slate-400 underline">다시풀기</button>` : ''}
           </div>
@@ -1356,7 +1618,6 @@
       const allNotes = getAllNotes();
       const wrongCount = Object.keys(user.wrongQuizzes || {}).length;
 
-      // Filter notes & quizzes by selectedSubjectFilter
       const filteredNotes = uiState.selectedSubjectFilter === 'all'
         ? allNotes
         : allNotes.filter(n => n.subjectId === uiState.selectedSubjectFilter);
@@ -1371,7 +1632,6 @@
 
       return `
         <div class="p-4 space-y-4">
-          <!-- Sub-Navigation Tabs -->
           <div class="grid grid-cols-4 gap-1 bg-slate-200/70 p-1 rounded-xl">
             <button onclick="setCurriculumSubTab('notes')"
               class="py-2 rounded-lg text-[11px] font-extrabold transition-all ${uiState.curriculumSubTab === 'notes' ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600'}">
@@ -1391,7 +1651,6 @@
             </button>
           </div>
 
-          <!-- Subject Filter Chips (for Notes & Quiz) -->
           ${(uiState.curriculumSubTab === 'notes' || uiState.curriculumSubTab === 'quiz') ? `
             <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
               <button onclick="setSubjectFilter('all')"
@@ -1411,7 +1670,6 @@
             </div>
           ` : ''}
 
-          <!-- SUB-TAB 1: SUMMARY NOTES -->
           ${uiState.curriculumSubTab === 'notes' ? `
             <div class="space-y-3">
               <div class="flex items-center justify-between">
@@ -1464,7 +1722,6 @@
             </div>
           ` : ''}
 
-          <!-- SUB-TAB 2: OX QUIZ BANK -->
           ${uiState.curriculumSubTab === 'quiz' ? `
             <div class="space-y-3">
               <div class="flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-200/80">
@@ -1492,10 +1749,8 @@
             </div>
           ` : ''}
 
-          <!-- SUB-TAB 3: 6 SUBJECTS CURRICULUM & ROADMAP -->
           ${uiState.curriculumSubTab === 'progress' ? `
             <div class="space-y-4">
-              <!-- 5-Step Annual Roadmap -->
               <div class="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-2xs space-y-2.5">
                 <h3 class="text-sm font-extrabold text-slate-900">🗺️ 검증된 5단계 연간 합격 로드맵</h3>
                 <div class="space-y-2">
@@ -1514,7 +1769,6 @@
                 </div>
               </div>
 
-              <!-- 6 Subjects Chapter Checklists -->
               ${SUBJECTS.map(sub => {
                 const doneCount = sub.chapters.filter((_, idx) => !!user.completedChapters[`${sub.id}-${idx}`]).length;
                 const pct = Math.round((doneCount / sub.chapters.length) * 100);
@@ -1556,7 +1810,6 @@
             </div>
           ` : ''}
 
-          <!-- SUB-TAB 4: BEGINNER TERMS DICTIONARY -->
           ${uiState.curriculumSubTab === 'terms' ? `
             <div class="space-y-2.5">
               <div class="bg-amber-50 border border-amber-200 rounded-2xl p-3.5">
@@ -1599,7 +1852,6 @@
 
       const coupleTotalSecs = wife.totalSeconds + husband.totalSeconds;
 
-      // Subject mastery stats
       const totalChapters = SUBJECTS.reduce((acc, s) => acc + s.chapters.length, 0);
       const doneChapters = Object.values(user.completedChapters).filter(Boolean).length;
       const solvedCorrect = Object.values(user.solvedQuizzes).filter(v => v.correct).length;
@@ -1614,9 +1866,11 @@
                 <span class="text-[11px] font-bold text-indigo-600">${user.avatar} ${user.name}님의 건축 현황</span>
                 <h2 class="text-base font-extrabold text-slate-900 mt-0.5">${stage.title}</h2>
               </div>
-              <button onclick="openEditNameModal()" class="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200">
-                이름변경
-              </button>
+              <div class="flex items-center gap-1.5">
+                <button onclick="openEditNameModal()" class="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200">
+                  이름변경
+                </button>
+              </div>
             </div>
 
             <div class="animate-float">
@@ -1689,7 +1943,21 @@
             </div>
           </div>
 
-          <!-- 3. Building Level Guide -->
+          <!-- 3. Data Backup & Restore Card (Prevents Safari Cache Loss) -->
+          <div class="bg-white rounded-2xl p-4 border border-slate-200/80 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <div>
+                <h4 class="text-xs font-extrabold text-slate-900">💾 학습 데이터 백업 / 기기 이동 복원</h4>
+                <p class="text-[11px] text-slate-500 mt-0.5">아이폰 사파리 캐시 초기화 대비 및 부부 기기 간 기록 동기화</p>
+              </div>
+              <button onclick="openBackupModal()"
+                class="shrink-0 px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-extrabold hover:bg-slate-800">
+                백업·복원 열기
+              </button>
+            </div>
+          </div>
+
+          <!-- 4. Building Level Guide -->
           <div class="bg-white rounded-2xl p-4 border border-slate-200/80 space-y-2">
             <h4 class="text-xs font-extrabold text-slate-800">🏗️ 합격의 집 건축 단계 안내</h4>
             <div class="space-y-1.5">
@@ -1770,6 +2038,33 @@
         `;
       }
 
+      if (uiState.showBackupModal) {
+        html += `
+          <div class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-4">
+            <div class="bg-white w-full max-w-md rounded-2xl p-4 space-y-3 shadow-2xl">
+              <div class="flex items-center justify-between">
+                <h3 class="text-sm font-extrabold text-slate-900">💾 학습 데이터 백업 & 복원</h3>
+                <button type="button" onclick="closeModals()" class="text-slate-400 text-sm font-bold">✕</button>
+              </div>
+              <p class="text-[11px] text-slate-600 leading-relaxed">
+                아래 백업 코드를 복사해 카카오톡 <b>'나에게 보내기'</b>에 저장해 두면, 기기를 바꾸거나 브라우저 데이터가 초기화되어도 언제든 그대로 복원할 수 있습니다.
+              </p>
+              <textarea id="backupTextarea" rows="5" class="w-full p-2.5 rounded-xl border border-slate-300 bg-slate-50 text-[11px] font-mono text-slate-700">${uiState.backupText}</textarea>
+              <div class="grid grid-cols-2 gap-2">
+                <button type="button" onclick="copyBackupCode()"
+                  class="py-2.5 rounded-xl bg-indigo-600 text-white font-extrabold text-xs hover:bg-indigo-700">
+                  📋 현재 기록 복사하기
+                </button>
+                <button type="button" onclick="restoreFromBackupCode()"
+                  class="py-2.5 rounded-xl bg-emerald-600 text-white font-extrabold text-xs hover:bg-emerald-700">
+                  📥 붙여넣은 코드 복원
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
       return html;
     }
 
@@ -1799,12 +2094,16 @@
     }
 
     // =========================================================================
-    // 7. GLOBAL WINDOW HELPERS & MAIN RENDER
+    // 8. GLOBAL WINDOW HELPERS & MAIN RENDER
     // =========================================================================
     window.switchProfile = switchProfile;
     window.setDailyGoal = setDailyGoal;
     window.setStrategyMode = setStrategyMode;
     window.userStrategyToggle = () => getActiveUser().strategyMode === 'first_priority' ? 'all_in_one' : 'first_priority';
+    window.selectDay = selectDay;
+    window.prevDay = prevDay;
+    window.nextDay = nextDay;
+    window.shuffleTodaySet = shuffleTodaySet;
     window.toggleTimer = toggleTimer;
     window.addQuickMinutes = addQuickMinutes;
     window.toggleChapter = toggleChapter;
@@ -1813,6 +2112,9 @@
     window.resetQuizChoice = resetQuizChoice;
     window.handleAddCustomNote = handleAddCustomNote;
     window.handleUpdateNames = handleUpdateNames;
+    window.openBackupModal = openBackupModal;
+    window.copyBackupCode = copyBackupCode;
+    window.restoreFromBackupCode = restoreFromBackupCode;
 
     window.switchTab = (tabId) => {
       uiState.activeTab = tabId;
@@ -1860,6 +2162,7 @@
     window.closeModals = () => {
       uiState.showAddNoteModal = false;
       uiState.showEditNameModal = false;
+      uiState.showBackupModal = false;
       render();
     };
 
