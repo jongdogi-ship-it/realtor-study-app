@@ -1751,6 +1751,7 @@
 
           ${uiState.curriculumSubTab === 'progress' ? `
             <div class="space-y-4">
+              ${renderCoverageDashboard(user)}
               <div class="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-2xs space-y-2.5">
                 <h3 class="text-sm font-extrabold text-slate-900">🗺️ 검증된 5단계 연간 합격 로드맵</h3>
                 <div class="space-y-2">
@@ -1828,6 +1829,221 @@
               `).join('')}
             </div>
           ` : ''}
+        </div>
+      `;
+    }
+
+
+    function getSubjectCoverage(user, sub) {
+      // Combine chapter checks, read notes, and solved quizzes for comprehensive coverage %
+      const chapTotal = sub.chapters.length;
+      const chapDone = sub.chapters.filter((_, idx) => !!user.completedChapters[`${sub.id}-${idx}`]).length;
+
+      const notes = getAllNotes().filter(n => n.subjectId === sub.id);
+      const notesTotal = notes.length;
+      const notesDone = notes.filter(n => !!user.readNotes[n.id]).length;
+
+      const quizzes = OX_QUIZZES.filter(q => q.subjectId === sub.id);
+      const quizTotal = quizzes.length;
+      const quizDone = quizzes.filter(q => !!(user.solvedQuizzes[q.id] && user.solvedQuizzes[q.id].correct)).length;
+
+      // Weighted overall coverage: Chapters 40% + Notes 30% + OX Mastery 30%
+      const chapPct = chapTotal > 0 ? (chapDone / chapTotal) : 0;
+      const notePct = notesTotal > 0 ? (notesDone / notesTotal) : 0;
+      const quizPct = quizTotal > 0 ? (quizDone / quizTotal) : 0;
+      const totalPct = Math.round((chapPct * 0.4 + notePct * 0.3 + quizPct * 0.3) * 100);
+
+      return {
+        chapDone, chapTotal,
+        notesDone, notesTotal,
+        quizDone, quizTotal,
+        totalPct
+      };
+    }
+
+    function renderCoverageDashboard(user) {
+      const subStats = SUBJECTS.map(s => ({ ...s, stat: getSubjectCoverage(user, s) }));
+      const part1Subs = subStats.filter(s => s.part === 1);
+      const part2Subs = subStats.filter(s => s.part === 2);
+
+      const part1Pct = Math.round(part1Subs.reduce((a, b) => a + b.stat.totalPct, 0) / part1Subs.length);
+      const part2Pct = Math.round(part2Subs.reduce((a, b) => a + b.stat.totalPct, 0) / part2Subs.length);
+      const overallPct = Math.round(subStats.reduce((a, b) => a + b.stat.totalPct, 0) / subStats.length);
+      const synergyPct = Math.round(Math.min(part1Pct, part2Pct)); // 동차 합격 교집합 달성도
+
+      // SVG Hexagon Radar Coordinates (center 160, 115, max radius 76)
+      const cx = 160, cy = 115, maxR = 76;
+      const angles = [-90, -30, 30, 90, 150, 210].map(deg => (deg * Math.PI) / 180);
+
+      function getHexPoints(radiusRatio) {
+        return angles.map(ang => {
+          const r = maxR * radiusRatio;
+          return `${(cx + r * Math.cos(ang)).toFixed(1)},${(cy + r * Math.sin(ang)).toFixed(1)}`;
+        }).join(' ');
+      }
+
+      const dataPoints = subStats.map((s, i) => {
+        const ratio = Math.max(0.12, s.stat.totalPct / 100);
+        const r = maxR * ratio;
+        return `${(cx + r * Math.cos(angles[i])).toFixed(1)},${(cy + r * Math.sin(angles[i])).toFixed(1)}`;
+      }).join(' ');
+
+      const labelOffsets = [
+        { dx: 0, dy: -12, anchor: 'middle' },
+        { dx: 12, dy: -2, anchor: 'start' },
+        { dx: 12, dy: 8, anchor: 'start' },
+        { dx: 0, dy: 16, anchor: 'middle' },
+        { dx: -12, dy: 8, anchor: 'end' },
+        { dx: -12, dy: -2, anchor: 'end' }
+      ];
+
+      // Venn Diagram circle ring dash
+      const rVenn = 58;
+      const circVenn = 2 * Math.PI * rVenn;
+      const p1Dash = ((part1Pct / 100) * circVenn).toFixed(1);
+      const p2Dash = ((part2Pct / 100) * circVenn).toFixed(1);
+
+      return `
+        <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200/80 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="text-[11px] font-bold text-indigo-600">📊 전체 학습 범위 & 위치 지도</span>
+              <h3 class="text-sm font-extrabold text-slate-900 mt-0.5">전체 커리큘럼 종합 달성률: <span class="text-indigo-600 text-base">${overallPct}%</span></h3>
+            </div>
+            <span class="text-[11px] font-extrabold px-2.5 py-1 rounded-full bg-slate-900 text-amber-300">
+              목표 60점 합격권
+            </span>
+          </div>
+
+          <!-- 1. 1차·2차 동차 합격 벤다이어그램 (Venn Diagram SVG) -->
+          <div class="bg-slate-50 rounded-xl p-3 border border-slate-200/70">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-extrabold text-slate-800">🔵 1차 vs 🟢 2차 시험 범위 벤다이어그램</span>
+              <span class="text-[10px] font-bold text-slate-500">동차 교집합 ${synergyPct}%</span>
+            </div>
+            <svg viewBox="0 0 320 148" class="w-full h-36">
+              <defs>
+                <clipPath id="vennOverlapClip">
+                  <circle cx="122" cy="74" r="${rVenn}" />
+                </clipPath>
+              </defs>
+
+              <!-- Left Circle: 1차 시험 (학개론·민법) -->
+              <circle cx="122" cy="74" r="${rVenn}" fill="#3B82F6" fill-opacity="0.12" stroke="#CBD5E1" stroke-width="2" />
+              <circle cx="122" cy="74" r="${rVenn}" fill="none" stroke="#2563EB" stroke-width="4.5"
+                stroke-dasharray="${p1Dash} ${circVenn}" stroke-linecap="round" transform="rotate(-90 122 74)" />
+
+              <!-- Right Circle: 2차 시험 (중개·공법·공시·세법) -->
+              <circle cx="198" cy="74" r="${rVenn}" fill="#10B981" fill-opacity="0.12" stroke="#CBD5E1" stroke-width="2" />
+              <circle cx="198" cy="74" r="${rVenn}" fill="none" stroke="#059669" stroke-width="4.5"
+                stroke-dasharray="${p2Dash} ${circVenn}" stroke-linecap="round" transform="rotate(-90 198 74)" />
+
+              <!-- Intersection Highlight (동차 합격 영역) -->
+              <circle cx="198" cy="74" r="${rVenn}" fill="#6366F1" fill-opacity="${0.12 + (synergyPct / 100) * 0.35}" clip-path="url(#vennOverlapClip)" />
+
+              <!-- Left Labels -->
+              <text x="95" y="64" text-anchor="middle" font-size="11" font-weight="800" fill="#1D4ED8">1차 시험</text>
+              <text x="95" y="81" text-anchor="middle" font-size="15" font-weight="900" fill="#1E3A8A">${part1Pct}%</text>
+              <text x="95" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#475569">학개론·민법</text>
+
+              <!-- Center Intersection Labels -->
+              <text x="160" y="69" text-anchor="middle" font-size="9.5" font-weight="800" fill="#4338CA">동차합격</text>
+              <text x="160" y="83" text-anchor="middle" font-size="12" font-weight="900" fill="#312E81">${synergyPct}%</text>
+
+              <!-- Right Labels -->
+              <text x="225" y="64" text-anchor="middle" font-size="11" font-weight="800" fill="#047857">2차 시험</text>
+              <text x="225" y="81" text-anchor="middle" font-size="15" font-weight="900" fill="#064E3B">${part2Pct}%</text>
+              <text x="225" y="95" text-anchor="middle" font-size="9" font-weight="600" fill="#475569">중개·공·공·세</text>
+            </svg>
+            <p class="text-[10px] text-slate-500 text-center">
+              원 테두리 게이지는 각 차수 진도율을, 가운데 보라색 교집합은 1·2차 동시 합격 밸런스를 보여줍니다.
+            </p>
+          </div>
+
+          <!-- 2. 6과목 육각형 레이더 밸런스 맵 (Radar Chart SVG) -->
+          <div class="bg-slate-50 rounded-xl p-3 border border-slate-200/70">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-extrabold text-slate-800">🕸️ 6과목 육각형 학습 밸런스 맵</span>
+              <span class="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">점선 = 60% 합격목표</span>
+            </div>
+            <svg viewBox="0 0 320 230" class="w-full h-52">
+              <!-- Outer 100% Hexagon -->
+              <polygon points="${getHexPoints(1.0)}" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2" />
+              <!-- 60% Passing Target Hexagon -->
+              <polygon points="${getHexPoints(0.6)}" fill="none" stroke="#F59E0B" stroke-width="1.2" stroke-dasharray="4 3" />
+              <!-- 40% Fail-line Hexagon -->
+              <polygon points="${getHexPoints(0.4)}" fill="none" stroke="#FCA5A5" stroke-width="1" stroke-dasharray="2 2" />
+              <!-- 20% Inner Hexagon -->
+              <polygon points="${getHexPoints(0.2)}" fill="none" stroke="#E2E8F0" stroke-width="1" />
+
+              <!-- Axis Spokes -->
+              ${angles.map(ang => `
+                <line x1="${cx}" y1="${cy}" x2="${(cx + maxR * Math.cos(ang)).toFixed(1)}" y2="${(cy + maxR * Math.sin(ang)).toFixed(1)}" stroke="#E2E8F0" stroke-width="1" />
+              `).join('')}
+
+              <!-- User Coverage Polygon -->
+              <polygon points="${dataPoints}" fill="#4F46E5" fill-opacity="0.28" stroke="#4F46E5" stroke-width="2.5" />
+
+              <!-- Vertex Dots & Subject Labels -->
+              ${subStats.map((s, i) => {
+                const ratio = Math.max(0.12, s.stat.totalPct / 100);
+                const vx = cx + maxR * ratio * Math.cos(angles[i]);
+                const vy = cy + maxR * ratio * Math.sin(angles[i]);
+                const lx = cx + maxR * Math.cos(angles[i]) + labelOffsets[i].dx;
+                const ly = cy + maxR * Math.sin(angles[i]) + labelOffsets[i].dy;
+                return `
+                  <circle cx="${vx.toFixed(1)}" cy="${vy.toFixed(1)}" r="4" fill="#4F46E5" stroke="#FFFFFF" stroke-width="1.5" />
+                  <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${labelOffsets[i].anchor}" font-size="10.5" font-weight="800" fill="#1E293B">
+                    ${s.short} <tspan fill="#4F46E5">${s.stat.totalPct}%</tspan>
+                  </text>
+                `;
+              }).join('')}
+            </svg>
+          </div>
+
+          <!-- 3. 과목별·단원별 전체 지도 (Where am I? Block Heatmap) -->
+          <div class="space-y-2.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-extrabold text-slate-800">🧱 과목별 전체 범위 블록 지도 (단원·노트·OX 통합)</span>
+              <span class="text-[10px] text-slate-400">터치하여 단원 체크</span>
+            </div>
+
+            <div class="space-y-2.5">
+              ${subStats.map(s => `
+                <div class="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-2">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${s.badge}">${s.part}차</span>
+                      <span class="text-xs font-extrabold text-slate-900">${s.name}</span>
+                    </div>
+                    <span class="text-xs font-black text-indigo-600">${s.stat.totalPct}%</span>
+                  </div>
+
+                  <!-- Chapter Blocks (Click any block to toggle chapter completion!) -->
+                  <div class="grid gap-1" style="grid-template-columns: repeat(${s.chapters.length}, minmax(0, 1fr));">
+                    ${s.chapters.map((chTitle, idx) => {
+                      const isDone = !!user.completedChapters[`${s.id}-${idx}`];
+                      return `
+                        <button onclick="toggleChapter('${s.id}', ${idx})" title="${chTitle}"
+                          class="h-6 rounded-md text-[10px] font-extrabold transition-all flex items-center justify-center border ${isDone
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                            : 'bg-white text-slate-400 border-slate-200 hover:border-indigo-300'}">
+                          ${idx + 1}장
+                        </button>
+                      `;
+                    }).join('')}
+                  </div>
+
+                  <!-- Sub-metrics bar: 단원 / 노트 / OX -->
+                  <div class="flex items-center justify-between text-[10px] text-slate-500 font-semibold pt-0.5">
+                    <span>📑 단원 ${s.stat.chapDone}/${s.stat.chapTotal}</span>
+                    <span>📖 노트 ${s.stat.notesDone}/${s.stat.notesTotal}</span>
+                    <span>⭕ OX정답 ${s.stat.quizDone}/${s.stat.quizTotal}</span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
         </div>
       `;
     }
@@ -1911,6 +2127,9 @@
               </div>
             </div>
           </div>
+
+          <!-- 1.5 Overall & Per-Subject Coverage Visualization (Venn + Radar + Block Map) -->
+          ${renderCoverageDashboard(user)}
 
           <!-- 2. Couple Together Comparison & Joint Milestone -->
           <div class="bg-gradient-to-br from-indigo-900 to-slate-900 text-white rounded-2xl p-4 shadow-md space-y-3">
